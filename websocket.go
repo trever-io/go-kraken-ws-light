@@ -1,6 +1,7 @@
 package krakenWebsocketLight
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -85,6 +86,9 @@ type Client struct {
 	MessageErrorHandler    ErrorHandler
 	KrakenErrorHandler     ErrorHandler
 
+	heartBeatCtx    context.Context
+	heartBeatCancel context.CancelFunc
+
 	OwnTradeHandler  OwnTradeHandler
 	OpenOrderHandler OpenOrderHandler
 }
@@ -98,17 +102,21 @@ func NewClient(key, secret string) (*Client, error) {
 
 	done := make(chan interface{})
 	heartBeat := make(chan struct{})
+	heartBeatCtx, heartBeatCancel := context.WithCancel(context.Background())
 
 	conn, _, err := websocket.DefaultDialer.Dial(KRAKEN_WS_AUTH_URL, nil)
 	if err != nil {
+		heartBeatCancel()
 		return nil, err
 	}
 
 	c := &Client{
-		token:     data.Token,
-		Done:      done,
-		conn:      conn,
-		heartBeat: heartBeat,
+		token:           data.Token,
+		Done:            done,
+		conn:            conn,
+		heartBeat:       heartBeat,
+		heartBeatCtx:    heartBeatCtx,
+		heartBeatCancel: heartBeatCancel,
 	}
 	go c.receiveMessages()
 
@@ -116,6 +124,7 @@ func NewClient(key, secret string) (*Client, error) {
 }
 
 func (c *Client) Close() {
+	c.heartBeatCancel()
 	c.doneSafeClose(c.Done)
 	c.heartBeatSafeClose(c.heartBeat)
 	c.conn.Close()
@@ -217,11 +226,13 @@ func (c *Client) receiveMessages() {
 	}
 }
 
-func (c *Client) waitForHeartBeat() {
+func (c *Client) waitForHeartBeat(ctx context.Context) {
 	defer c.doneSafeClose(c.Done)
 	for {
 		timer := time.NewTimer(HEARTBEAT_TIMEOUT)
 		select {
+		case <-ctx.Done():
+			return
 		case <-c.heartBeat:
 			timer.Stop()
 		case <-timer.C:
@@ -243,7 +254,7 @@ func (c *Client) SubscribeOpenOrders() error {
 
 	event := NewOpenOrdersSubscriptionEvent(c.token)
 	c.heartBeatRunning.Do(func() {
-		go c.waitForHeartBeat()
+		go c.waitForHeartBeat(c.heartBeatCtx)
 	})
 	return c.conn.WriteJSON(&event)
 }
@@ -282,7 +293,7 @@ func (c *Client) SubscribeOwnTrades() error {
 
 	event := NewOwnTradesSubscriptionEvent(c.token)
 	c.heartBeatRunning.Do(func() {
-		go c.waitForHeartBeat()
+		go c.waitForHeartBeat(c.heartBeatCtx)
 	})
 	return c.conn.WriteJSON(&event)
 }
